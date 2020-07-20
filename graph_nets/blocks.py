@@ -414,24 +414,7 @@ class EdgeBlock(snt.AbstractModule):
     with self._enter_variable_scope():
       self._edge_model = edge_model_fn()
 
-  def _build(self, graph):
-    """Connects the edge block.
-
-    Args:
-      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
-        features (if `use_edges` is `True`), individual nodes features (if
-        `use_receiver_nodes` or `use_sender_nodes` is `True`) and per graph
-        globals (if `use_globals` is `True`) should be concatenable on the last
-        axis.
-
-    Returns:
-      An output `graphs.GraphsTuple` with updated edges.
-
-    Raises:
-      ValueError: If `graph` does not have non-`None` receivers and senders, or
-        if `graph` has `None` fields incompatible with the selected `use_edges`,
-        `use_receiver_nodes`, `use_sender_nodes`, or `use_globals` options.
-    """
+  def _crete_colletion(self, graph):
     _validate_graph(
         graph, (SENDERS, RECEIVERS, N_EDGE), " when using an EdgeBlock")
 
@@ -451,7 +434,28 @@ class EdgeBlock(snt.AbstractModule):
       edges_to_collect.append(broadcast_globals_to_edges(graph))
 
     collected_edges = tf.concat(edges_to_collect, axis=-1)
-    updated_edges = self._edge_model(collected_edges)
+    return collected_edges
+
+  def _build(self, graph, **kwargs):
+    """Connects the edge block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_edges` is `True`), individual nodes features (if
+        `use_receiver_nodes` or `use_sender_nodes` is `True`) and per graph
+        globals (if `use_globals` is `True`) should be concatenable on the last
+        axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated edges.
+
+    Raises:
+      ValueError: If `graph` does not have non-`None` receivers and senders, or
+        if `graph` has `None` fields incompatible with the selected `use_edges`,
+        `use_receiver_nodes`, `use_sender_nodes`, or `use_globals` options.
+    """
+    collected_edges = self._crete_colletion(graph)
+    updated_edges = self._edge_model(collected_edges, **kwargs)
     return graph.replace(edges=updated_edges)
 
 
@@ -532,19 +536,7 @@ class NodeBlock(snt.AbstractModule):
         self._sent_edges_aggregator = SentEdgesToNodesAggregator(
             sent_edges_reducer)
 
-  def _build(self, graph):
-    """Connects the node block.
-
-    Args:
-      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
-        features (if `use_received_edges` or `use_sent_edges` is `True`),
-        individual nodes features (if `use_nodes` is True) and per graph globals
-        (if `use_globals` is `True`) should be concatenable on the last axis.
-
-    Returns:
-      An output `graphs.GraphsTuple` with updated nodes.
-    """
-
+  def _crete_colletion(self, graph):
     nodes_to_collect = []
 
     if self._use_received_edges:
@@ -561,7 +553,22 @@ class NodeBlock(snt.AbstractModule):
       nodes_to_collect.append(broadcast_globals_to_nodes(graph))
 
     collected_nodes = tf.concat(nodes_to_collect, axis=-1)
-    updated_nodes = self._node_model(collected_nodes)
+    return collected_nodes
+
+  def _build(self, graph, **kwargs):
+    """Connects the node block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_received_edges` or `use_sent_edges` is `True`),
+        individual nodes features (if `use_nodes` is True) and per graph globals
+        (if `use_globals` is `True`) should be concatenable on the last axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated nodes.
+    """
+    collected_nodes = self._crete_colletion(graph)
+    updated_nodes = self._node_model(collected_nodes, **kwargs)
     return graph.replace(nodes=updated_nodes)
 
 
@@ -633,18 +640,7 @@ class GlobalBlock(snt.AbstractModule):
         self._nodes_aggregator = NodesToGlobalsAggregator(
             nodes_reducer)
 
-  def _build(self, graph):
-    """Connects the global block.
-
-    Args:
-      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
-        (if `use_edges` is `True`), individual nodes (if `use_nodes` is True)
-        and per graph globals (if `use_globals` is `True`) should be
-        concatenable on the last axis.
-
-    Returns:
-      An output `graphs.GraphsTuple` with updated globals.
-    """
+  def _crete_colletion(self, graph):
     globals_to_collect = []
 
     if self._use_edges:
@@ -660,5 +656,246 @@ class GlobalBlock(snt.AbstractModule):
       globals_to_collect.append(graph.globals)
 
     collected_globals = tf.concat(globals_to_collect, axis=-1)
-    updated_globals = self._global_model(collected_globals)
+    return collected_globals
+
+  def _build(self, graph, **kwargs):
+    """Connects the global block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        (if `use_edges` is `True`), individual nodes (if `use_nodes` is True)
+        and per graph globals (if `use_globals` is `True`) should be
+        concatenable on the last axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated globals.
+    """
+    collected_globals = self._crete_colletion(graph)
+    updated_globals = self._global_model(collected_globals, **kwargs)
     return graph.replace(globals=updated_globals)
+
+
+class GatedEdgeBlock(snt.AbstractModule):
+  """Gated edge block.
+
+  A block that updates the features of each edge in a batch of graphs based on
+  (a subset of) the previous edge features, the features of the adjacent nodes,
+  and the global features of the corresponding graph.
+
+  See https://arxiv.org/abs/1806.01261 for more details.
+  """
+
+  def __init__(self,
+               gate_recurrent_model_fn,
+               use_edges=True,
+               use_receiver_nodes=True,
+               use_sender_nodes=True,
+               use_globals=True,
+               dtype=tf.float64,
+               name="gated_edge_block"):
+    """Initializes the EdgeBlock module.
+
+    Args:
+      use_edges: (bool, default=True). Whether to condition on edge attributes.
+      use_receiver_nodes: (bool, default=True). Whether to condition on receiver
+        node attributes.
+      use_sender_nodes: (bool, default=True). Whether to condition on sender
+        node attributes.
+      use_globals: (bool, default=True). Whether to condition on global
+        attributes.
+      name: The module name.
+
+    Raises:
+      ValueError: When fields that are required are missing.
+    """
+    super(GatedEdgeBlock, self).__init__(name=name)
+
+    if not (use_edges or use_sender_nodes or use_receiver_nodes or use_globals):
+      raise ValueError("At least one of use_edges, use_sender_nodes, "
+                       "use_receiver_nodes or use_globals must be True.")
+
+    self._use_edges = use_edges
+    self._use_receiver_nodes = use_receiver_nodes
+    self._use_sender_nodes = use_sender_nodes
+    self._use_globals = use_globals
+    self._dtype = dtype
+
+    with self._enter_variable_scope():
+      self._edge_cell = gate_recurrent_model_fn()
+
+  def reset_state(self, batch_size, state=None):
+    if state is not None:
+      self._state = state
+    else:
+      self._state = self._edge_cell.get_initial_state(batch_size=batch_size, dtype=self._dtype)
+
+  def _crete_colletion(self, graph):
+    _validate_graph(
+        graph, (SENDERS, RECEIVERS, N_EDGE), " when using an EdgeBlock")
+
+    edges_to_collect = []
+
+    if self._use_edges:
+      _validate_graph(graph, (EDGES,), "when use_edges == True")
+      edges_to_collect.append(graph.edges)
+
+    if self._use_receiver_nodes:
+      edges_to_collect.append(broadcast_receiver_nodes_to_edges(graph))
+
+    if self._use_sender_nodes:
+      edges_to_collect.append(broadcast_sender_nodes_to_edges(graph))
+
+    if self._use_globals:
+      edges_to_collect.append(broadcast_globals_to_edges(graph))
+
+    collected_edges = tf.concat(edges_to_collect, axis=-1)
+    return collected_edges
+
+  def _build(self, graph, **kwargs):
+    """Connects the edge block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_edges` is `True`), individual nodes features (if
+        `use_receiver_nodes` or `use_sender_nodes` is `True`) and per graph
+        globals (if `use_globals` is `True`) should be concatenable on the last
+        axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated edges.
+
+    Raises:
+      ValueError: If `graph` does not have non-`None` receivers and senders, or
+        if `graph` has `None` fields incompatible with the selected `use_edges`,
+        `use_receiver_nodes`, `use_sender_nodes`, or `use_globals` options.
+    """
+    collected_edges = self._crete_colletion(graph)
+    updated_edges, current_state = self._edge_cell(collected_edges, self._state, **kwargs)
+    self._state = current_state
+    return graph.replace(edges=updated_edges)
+
+class GatedNodeBlock(snt.AbstractModule):
+  """Gated node block.
+
+  A block that updates the features of each node in batch of graphs based on
+  (a subset of) the previous node features, the aggregated features of the
+  adjacent edges, the global features of the corresponding graph and previous satates.
+
+  See https://arxiv.org/abs/1812.08434 equation 21.
+  """
+
+  def __init__(self,
+               gate_recurrent_model_fn,
+               bias_shape,
+               use_received_edges=True,
+               use_sent_edges=False,
+               use_nodes=True,
+               use_globals=True,
+               received_edges_reducer=tf.unsorted_segment_sum,
+               sent_edges_reducer=tf.unsorted_segment_sum,
+               dtype=tf.float64,
+               name="gated_node_block"):
+    """Initializes the GatedNodeBlock module.
+
+    Args:
+      units: Number of neurons in GRUCell.
+      bias_shape: Shape of the bias used to make the aggregation before recurrent cell.
+      recurrent_dropout: Recurrent dropout for GRUCell.
+      dropout: Dropout for GRUCell.
+      use_received_edges: (bool, default=True) Whether to condition on
+        aggregated edges received by each node.
+      use_sent_edges: (bool, default=False) Whether to condition on aggregated
+        edges sent by each node.
+      use_nodes: (bool, default=True) Whether to condition on node attributes.
+      use_globals: (bool, default=True) Whether to condition on global
+        attributes.
+      received_edges_reducer: Reduction to be used when aggregating received
+        edges. This should be a callable whose signature matches
+        `tf.unsorted_segment_sum`.
+      sent_edges_reducer: Reduction to be used when aggregating sent edges.
+        This should be a callable whose signature matches
+        `tf.unsorted_segment_sum`.
+      name: The module name.
+
+    Raises:
+      ValueError: When fields that are required are missing.
+    """
+
+    super(GatedNodeBlock, self).__init__(name=name)
+
+    if not (use_nodes or use_sent_edges or use_received_edges or use_globals):
+      raise ValueError("At least one of use_received_edges, use_sent_edges, "
+                       "use_nodes or use_globals must be True.")
+
+    self._use_received_edges = use_received_edges
+    self._use_sent_edges = use_sent_edges
+    self._use_nodes = use_nodes
+    self._use_globals = use_globals
+    self._dtype = dtype
+
+    with self._enter_variable_scope():
+      self._bias_node = tf.get_variable("biasNode", shape=bias_shape, dtype=self._dtype)
+      self._node_cell = gate_recurrent_model_fn()
+
+      if self._use_received_edges:
+        if received_edges_reducer is None:
+          raise ValueError(
+              "If `use_received_edges==True`, `received_edges_reducer` "
+              "should not be None.")
+        self._received_edges_aggregator = ReceivedEdgesToNodesAggregator(
+            received_edges_reducer)
+      if self._use_sent_edges:
+        if sent_edges_reducer is None:
+          raise ValueError(
+              "If `use_sent_edges==True`, `sent_edges_reducer` "
+              "should not be None.")
+        self._sent_edges_aggregator = SentEdgesToNodesAggregator(
+            sent_edges_reducer)
+
+  def reset_state(self, batch_size, state=None):
+    if state is not None:
+      self._state = state
+    else:
+      self._state = self._node_cell.get_initial_state(batch_size=batch_size, dtype=self._dtype)
+
+  def _crete_colletion(self, graph):
+    nodes_to_collect = []
+
+    if self._use_received_edges:
+      nodes_to_collect.append(self._received_edges_aggregator(graph))
+
+    if self._use_sent_edges:
+      nodes_to_collect.append(self._sent_edges_aggregator(graph))
+
+    if self._use_nodes:
+      _validate_graph(graph, (NODES,), "when use_nodes == True")
+      nodes_to_collect.append(graph.nodes)
+
+    if self._use_globals:
+      nodes_to_collect.append(broadcast_globals_to_nodes(graph))
+
+    collected_nodes = tf.concat(nodes_to_collect, axis=-1)
+    return collected_nodes
+
+  def _build(self, graph, **kwargs):
+    """Connects the node block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_received_edges` or `use_sent_edges` is `True`),
+        individual nodes features (if `use_nodes` is True) and per graph globals
+        (if `use_globals` is `True`) should be concatenable on the last axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated nodes.
+    """
+    collected_nodes = self._crete_colletion(graph)
+    receivers = graph.receivers
+    senders = graph.senders
+    num_nodes = tf.reduce_sum(graph.n_node)
+    senders_features = tf.gather(collected_nodes, senders)
+    neighbors_sum = tf.unsorted_segment_sum(senders_features, receivers, num_nodes)
+    input_features = tf.add(neighbors_sum, self._bias_node)
+    updated_nodes, current_state = self._node_cell(input_features, self._state, **kwargs)
+    self._state = current_state
+    return graph.replace(nodes=updated_nodes)

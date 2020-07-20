@@ -118,7 +118,7 @@ class InteractionNetwork(snt.AbstractModule):
           use_globals=False,
           received_edges_reducer=reducer)
 
-  def _build(self, graph):
+  def _build(self, graph, **kwargs):
     """Connects the InterationNetwork.
 
     Args:
@@ -134,7 +134,7 @@ class InteractionNetwork(snt.AbstractModule):
       ValueError: If any of `graph.nodes`, `graph.edges`, `graph.receivers` or
         `graph.senders` is `None`.
     """
-    return self._node_block(self._edge_block(graph))
+    return self._node_block(self._edge_block(graph, **kwargs), **kwargs)
 
 
 class RelationNetwork(snt.AbstractModule):
@@ -182,7 +182,7 @@ class RelationNetwork(snt.AbstractModule):
           use_globals=False,
           edges_reducer=reducer)
 
-  def _build(self, graph):
+  def _build(self, graph, **kwargs):
     """Connects the RelationNetwork.
 
     Args:
@@ -196,7 +196,7 @@ class RelationNetwork(snt.AbstractModule):
       ValueError: If any of `graph.nodes`, `graph.receivers` or `graph.senders`
         is `None`.
     """
-    output_graph = self._global_block(self._edge_block(graph))
+    output_graph = self._global_block(self._edge_block(graph, **kwargs), **kwargs)
     return graph.replace(globals=output_graph.globals)
 
 
@@ -285,7 +285,7 @@ class GraphNetwork(snt.AbstractModule):
       self._global_block = blocks.GlobalBlock(
           global_model_fn=global_model_fn, **global_block_opt)
 
-  def _build(self, graph):
+  def _build(self, graph, **kwargs):
     """Connects the GraphNetwork.
 
     Args:
@@ -298,7 +298,7 @@ class GraphNetwork(snt.AbstractModule):
     Returns:
       An output `graphs.GraphsTuple` with updated edges, nodes and globals.
     """
-    return self._global_block(self._node_block(self._edge_block(graph)))
+    return self._global_block(self._node_block(self._edge_block(graph, **kwargs), **kwargs), **kwargs)
 
 
 class GraphIndependent(snt.AbstractModule):
@@ -336,22 +336,22 @@ class GraphIndependent(snt.AbstractModule):
       # result from the edge/node/global_model_fns are scoped analogous to how
       # the Edge/Node/GlobalBlock classes do.
       if edge_model_fn is None:
-        self._edge_model = lambda x: x
+        self._edge_model = lambda x, **kwargs: x
       else:
         self._edge_model = snt.Module(
-            lambda x: edge_model_fn()(x), name="edge_model")  # pylint: disable=unnecessary-lambda
+            lambda x, **kwargs: edge_model_fn()(x, **kwargs), name="edge_model")  # pylint: disable=unnecessary-lambda
       if node_model_fn is None:
-        self._node_model = lambda x: x
+        self._node_model = lambda x, **kwargs: x
       else:
         self._node_model = snt.Module(
-            lambda x: node_model_fn()(x), name="node_model")  # pylint: disable=unnecessary-lambda
+            lambda x, **kwargs: node_model_fn()(x, **kwargs), name="node_model")  # pylint: disable=unnecessary-lambda
       if global_model_fn is None:
-        self._global_model = lambda x: x
+        self._global_model = lambda x, **kwargs: x
       else:
         self._global_model = snt.Module(
-            lambda x: global_model_fn()(x), name="global_model")  # pylint: disable=unnecessary-lambda
+            lambda x, **kwargs: global_model_fn()(x, **kwargs), name="global_model")  # pylint: disable=unnecessary-lambda
 
-  def _build(self, graph):
+  def _build(self, graph, **kwargs):
     """Connects the GraphIndependent.
 
     Args:
@@ -363,9 +363,9 @@ class GraphIndependent(snt.AbstractModule):
 
     """
     return graph.replace(
-        edges=self._edge_model(graph.edges),
-        nodes=self._node_model(graph.nodes),
-        globals=self._global_model(graph.globals))
+        edges=self._edge_model(graph.edges, **kwargs),
+        nodes=self._node_model(graph.nodes, **kwargs),
+        globals=self._global_model(graph.globals, **kwargs))
 
 
 class DeepSets(snt.AbstractModule):
@@ -431,7 +431,7 @@ class DeepSets(snt.AbstractModule):
           use_globals=False,
           nodes_reducer=reducer)
 
-  def _build(self, graph):
+  def _build(self, graph, **kwargs):
     """Connects the DeepSets network.
 
     Args:
@@ -444,7 +444,7 @@ class DeepSets(snt.AbstractModule):
     Returns:
       An output `graphs.GraphsTuple` with updated globals.
     """
-    return self._global_block(self._node_block(graph))
+    return self._global_block(self._node_block(graph, **kwargs), **kwargs)
 
 
 class CommNet(snt.AbstractModule):

@@ -347,7 +347,7 @@ def _compute_stacked_offsets(sizes, repeats):
   return repeat(offset_values, repeats)
 
 
-def concat(input_graphs, axis, name="graph_concat"):
+def concat(input_graphs, axis, use_global=True, name="graph_concat"):
   """Returns an op that concatenates graphs along a given axis.
 
   In all cases, the NODES, EDGES and GLOBALS dimension are concatenated
@@ -380,16 +380,20 @@ def concat(input_graphs, axis, name="graph_concat"):
     return input_graphs[0]
   nodes = [gr.nodes for gr in input_graphs if gr.nodes is not None]
   edges = [gr.edges for gr in input_graphs if gr.edges is not None]
-  globals_ = [gr.globals for gr in input_graphs if gr.globals is not None]
+  if use_global:
+      globals_ = [gr.globals for gr in input_graphs if gr.globals is not None]
 
   with tf.name_scope(name):
     nodes = tf.concat(nodes, axis, name="concat_nodes") if nodes else None
     edges = tf.concat(edges, axis, name="concat_edges") if edges else None
-    if globals_:
-      globals_ = tf.concat(globals_, axis, name="concat_globals")
+    if use_global:
+      if globals_:
+        globals_ = tf.concat(globals_, axis, name="concat_globals")
+      else:
+        globals_ = None
+      output = input_graphs[0].replace(nodes=nodes, edges=edges, globals=globals_)
     else:
-      globals_ = None
-    output = input_graphs[0].replace(nodes=nodes, edges=edges, globals=globals_)
+      output = input_graphs[0].replace(nodes=nodes, edges=edges)
     if axis != 0:
       return output
     n_node_per_tuple = tf.stack(
