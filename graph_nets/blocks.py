@@ -692,3 +692,99 @@ class GlobalBlock(_base.AbstractModule):
     collected_globals = tf.concat(globals_to_collect, axis=-1)
     updated_globals = self._global_model(collected_globals)
     return graph.replace(globals=updated_globals)
+
+
+class RecurrentEdgeBlock(EdgeBlock):
+  """Recurrent Edge block.
+
+  A block that updates the features of each edge in a batch of graphs based on
+  (a subset of) the previous edge features, the previous recurretn state,
+  the features of the adjacent nodes, and the global features of the corresponding graph.
+  The updating must uses a recurrent Sonnet model.
+  """
+
+  def __init__(self,
+               edge_recurrent_model_fn,
+               use_edges=True,
+               use_receiver_nodes=True,
+               use_sender_nodes=True,
+               use_globals=True,
+               name="recurrent edge_block"):
+    """Initializes the RecurrentEdgeBlock module.
+
+    Args:
+      edge_recurrent_model_fn: A callable that will be called in the variable scope of
+        this RecurrentEdgeBlock and should return a Sonnet recurrent module (or equivalent
+        callable) to be used as the edge model. The returned recurretn module should take
+        two `Tensors` (one of concatenated input features for each edge and other
+        of previous recurrent state) and return a tuple of two `Tensors` (one of output
+        features for each edge and other of nest recurrent state). See the `_build` method
+        documentation for more details on the acceptable inputs to this module in that case.
+      use_edges: (bool, default=True). Whether to condition on edge attributes.
+      use_receiver_nodes: (bool, default=True). Whether to condition on receiver
+        node attributes.
+      use_sender_nodes: (bool, default=True). Whether to condition on sender
+        node attributes.
+      use_globals: (bool, default=True). Whether to condition on global
+        attributes.
+      name: The module name.
+
+    Raises:
+      ValueError: When fields that are required are missing.
+    """
+    super(RecurrentEdgeBlock, self).__init__(edge_model_fn=edge_recurrent_model_fn,
+                                             use_edges=use_edges,
+                                             use_receiver_nodes=use_receiver_nodes,
+                                             use_sender_nodes=use_sender_nodes,
+                                             use_globals=use_globals,
+                                             name=name)
+
+  def _build(self, graph, prev_state, **kwargs):
+    """Connects the edge block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_edges` is `True`), individual nodes features (if
+        `use_receiver_nodes` or `use_sender_nodes` is `True`) and per graph
+        globals (if `use_globals` is `True`) should be concatenable on the last
+        axis.
+    prev_state: A previous recurrent state.
+    **kwargs: Optional keyword arguments to pass to the Sonnet module.
+
+    Returns:
+      A tuple with two elements, an output `graphs.GraphsTuple` with updated edges and
+      a next recurrent state.
+
+    Raises:
+      ValueError: If `graph` does not have non-`None` receivers, senders and prev_state,
+         or if `graph` has `None` fields incompatible with the selected `use_edges`,
+        `use_receiver_nodes`, `use_sender_nodes`, or `use_globals` options.
+    """
+    _validate_graph(
+        graph, (SENDERS, RECEIVERS, N_EDGE), " when using an RecurrentEdgeBlock")
+
+    edges_to_collect = []
+
+    if self._use_edges:
+      _validate_graph(graph, (EDGES,), "when use_edges == True")
+      edges_to_collect.append(graph.edges)
+
+    if self._use_receiver_nodes:
+      edges_to_collect.append(broadcast_receiver_nodes_to_edges(graph))
+
+    if self._use_sender_nodes:
+      edges_to_collect.append(broadcast_sender_nodes_to_edges(graph))
+
+    if self._use_globals:
+      num_edges_hint = _get_static_num_edges(graph)
+      edges_to_collect.append(
+          broadcast_globals_to_edges(graph, num_edges_hint=num_edges_hint))
+
+    collected_edges = tf.concat(edges_to_collect, axis=-1)
+    updated_edges, next_state = self._edge_model(collected_edges, prev_state, **kwargs)
+    return graph.replace(edges=updated_edges), next_state
+
+
+# TODO: The recurrent aggregation will be inside node and global models for recurrent layers.
+#       The method member for recurrent aggregation will take a callable that instantiate a
+#       aggregator model which will be a simple aggregation or a Sonnet model.
