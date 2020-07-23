@@ -694,11 +694,55 @@ class GlobalBlock(_base.AbstractModule):
     return graph.replace(globals=updated_globals)
 
 
+class NeighborhoodAggregator(_base.AbstractModule):
+  """Agregates sender or receiver features into the corresponding nodes."""
+
+  def __init__(self, reducer, to_senders=False,
+               name="neighborhood_aggregator"):
+    """Constructor.
+
+    The reducer is used for combining one set of sender/receiver
+    feature vectors per receiver/sender to give per-receiver/sender features
+    (one feature vector per receiver/sender). The reducer should take a `Tensor`
+    of sender/receiver features, a `Tensor` of segment indices, and a number of
+    nodes. It should be invariant under permutation of sender/receiver features
+    within each segment.
+
+    Examples of compatible reducers are:
+    * tf.math.unsorted_segment_sum
+    * tf.math.unsorted_segment_mean
+    * tf.math.unsorted_segment_prod
+    * unsorted_segment_min_or_zero
+    * unsorted_segment_max_or_zero
+
+    Args:
+      reducer: A function for reducing sets of per-sender features to individual
+        per-receiver features.
+      name: The module name.
+    """
+    super(NeighborhoodAggregator, self).__init__(name=name)
+    self._reducer = reducer
+    self._to_senders = to_senders
+
+  def _build(self, graph):
+    _validate_graph(graph, (EDGES, SENDERS, RECEIVERS,),
+                    additional_message="when aggregating from node features.")
+    # If the number of nodes are known at graph construction time (based on the
+    # shape) then use that value to make the model compatible with XLA/TPU.
+    if graph.nodes is not None and graph.nodes.shape.as_list()[0] is not None:
+      num_nodes = graph.nodes.shape.as_list()[0]
+    else:
+      num_nodes = tf.reduce_sum(graph.n_node)
+    indices = graph.senders if self._to_senders else graph.receivers
+    broadcast = broadcast_receiver_nodes_to_edges if self._to_senders else broadcast_sender_nodes_to_edges
+    return self._reducer(broadcast(graph), indices, num_nodes)
+
+
 class RecurrentEdgeBlock(EdgeBlock):
   """Recurrent Edge block.
 
   A block that updates the features of each edge in a batch of graphs based on
-  (a subset of) the previous edge features, the previous recurretn state,
+  (a subset of) the previous edge features, the previous recurrent state,
   the features of the adjacent nodes, and the global features of the corresponding graph.
   The updating must uses a recurrent Sonnet model.
   """
@@ -715,10 +759,10 @@ class RecurrentEdgeBlock(EdgeBlock):
     Args:
       edge_recurrent_model_fn: A callable that will be called in the variable scope of
         this RecurrentEdgeBlock and should return a Sonnet recurrent module (or equivalent
-        callable) to be used as the edge model. The returned recurretn module should take
+        callable) to be used as the edge model. The returned recurrent module should take
         two `Tensors` (one of concatenated input features for each edge and other
         of previous recurrent state) and return a tuple of two `Tensors` (one of output
-        features for each edge and other of nest recurrent state). See the `_build` method
+        features for each edge and other of next recurrent state). See the `_build` method
         documentation for more details on the acceptable inputs to this module in that case.
       use_edges: (bool, default=True). Whether to condition on edge attributes.
       use_receiver_nodes: (bool, default=True). Whether to condition on receiver
@@ -738,6 +782,16 @@ class RecurrentEdgeBlock(EdgeBlock):
                                              use_sender_nodes=use_sender_nodes,
                                              use_globals=use_globals,
                                              name=name)
+
+  def initial_state(self, batch_size, **kwargs):
+    """Constructs an initial state for the recurrent model.
+    Args:
+      batch_size: An int or an integral scalar tensor representing batch size.
+      **kwargs: Optional keyword arguments.
+    Returns:
+      Arbitrarily nested initial state for the recurrent model.
+    """
+    self._edge_model.initial_state(batch_size, **kwargs)
 
   def _build(self, graph, prev_state, **kwargs):
     """Connects the edge block.
@@ -785,6 +839,129 @@ class RecurrentEdgeBlock(EdgeBlock):
     return graph.replace(edges=updated_edges), next_state
 
 
-# TODO: The recurrent aggregation will be inside node and global models for recurrent layers.
-#       The method member for recurrent aggregation will take a callable that instantiate a
-#       aggregator model which will be a simple aggregation or a Sonnet model.
+# TODO: It seems to me that use_received_edges and use_sent_edges could be merged in only one variable.
+#       Moreover, this seems to be possible for Aggregation class.
+class RecurrentNodeBlock(NodeBlock):
+  """Recurrent Node block.
+
+  A block that updates the features of each node in batch of graphs based on
+  (a subset of) the previous node features, the previous recurrent state,
+  the aggregated features of the adjacent edges, and the global features of
+  the corresponding graph.
+
+  See https://arxiv.org/abs/1806.01261 for more details.
+  """
+
+  def __init__(self,
+               node_recurrent_model_fn,
+               use_received_edges=True,
+               use_sent_edges=False,
+               use_nodes=True,
+               use_globals=True,
+               aggregator_model_fn=NodesAggregator,
+               neighborhood_reducer=tf.math.unsorted_segment_sum,
+               received_edges_reducer=tf.math.unsorted_segment_sum,
+               sent_edges_reducer=tf.math.unsorted_segment_sum,
+               name="node_block"):
+    """Initializes the NodeBlock module.
+
+    Args:
+      node_recurrent_model_fn: A callable that will be called in the variable scope of
+        this RecurrentNodeBlock and should return a Sonnet recurrent module (or equivalent
+        callable) to be used as the node model. The returned recurrent module should take
+        two `Tensors` (one of concatenated input features for each node and other
+        of previous recurrent state) and return a tuple of two `Tensors` (one of output
+        features for each node and other of next recurrent state). See the `_build` method
+        documentation for more details on the acceptable inputs to this module in that case.
+      use_received_edges: (bool, default=True) Whether to condition on
+        aggregated edges received by each node.
+      use_sent_edges: (bool, default=False) Whether to condition on aggregated
+        edges sent by each node.
+      use_nodes: (bool, default=True) Whether to condition on node attributes.
+      use_globals: (bool, default=True) Whether to condition on global
+        attributes.
+      aggregator_model_fn: A callable that will be called in the variable scope
+        of this RecurrentNodeBlock and should return a aggregator model that takes a
+        `graphs.GraphsTuple` and return the reduction for each node neighborhood. The
+        contruction shoud accepting a reducer, and a boolean `to_sender` which determines
+        if how neighboor a neighboor should be defined from sender to receiver or from
+        receiver to sender. The default aggregator model is a simple summation among
+        neighborhood.
+      neighborhood_reducer: Reduction to be used when aggregating neighborhood
+        features. This should be a callable whose signature matches
+        `tf.math.unsorted_segment_sum`.
+      received_edges_reducer: Reduction to be used when aggregating received
+        edges. This should be a callable whose signature matches
+        `tf.math.unsorted_segment_sum`.
+      sent_edges_reducer: Reduction to be used when aggregating sent edges.
+        This should be a callable whose signature matches
+        `tf.math.unsorted_segment_sum`.
+      name: The module name.
+
+    Raises:
+      ValueError: When fields that are required are missing.
+    """
+
+    super(RecurrentNodeBlock, self).__init__(node_model_fn=node_recurrent_model_fn,
+                                    use_received_edges=use_received_edges,
+                                    use_sent_edges=use_sent_edges,
+                                    use_nodes=use_nodes,
+                                    use_globals=use_globals,
+                                    received_edges_reducer=tf.math.unsorted_segment_sum,
+                                    sent_edges_reducer=tf.math.unsorted_segment_sum,
+                                    name=name)
+
+    with self._enter_variable_scope():
+      self._aggregator_model = aggregator_model_fn(neighborhood_reducer,
+                                                   to_sender=False if self._use_received_edges else True)
+
+  def initial_state(self, batch_size, **kwargs):
+    """Constructs an initial state for the recurrent model.
+    Args:
+      batch_size: An int or an integral scalar tensor representing batch size.
+      **kwargs: Optional keyword arguments.
+    Returns:
+      Arbitrarily nested initial state for the recurrent model.
+    """
+    self._node_model.initial_state(batch_size, **kwargs)
+
+
+  def _build(self, graph, prev_state, **kwargs):
+    """Connects the node block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_received_edges` or `use_sent_edges` is `True`),
+        individual nodes features (if `use_nodes` is True) and per graph globals
+        (if `use_globals` is `True`) should be concatenable on the last axis.
+      prev_state: A previous recurrent state.
+      **kwargs: Optional keyword arguments to pass to the Sonnet module.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated nodes.
+    """
+
+    nodes_to_collect = []
+
+    if self._use_received_edges:
+      nodes_to_collect.append(self._received_edges_aggregator(graph))
+
+    if self._use_sent_edges:
+      nodes_to_collect.append(self._sent_edges_aggregator(graph))
+
+    if self._use_nodes:
+      _validate_graph(graph, (NODES,), "when use_nodes == True")
+      nodes_to_collect.append(graph.nodes)
+
+    if self._use_globals:
+      # The hint will be an integer if the graph has node features and the total
+      # number of nodes is known at tensorflow graph definition time, or None
+      # otherwise.
+      num_nodes_hint = _get_static_num_nodes(graph)
+      nodes_to_collect.append(
+          broadcast_globals_to_nodes(graph, num_nodes_hint=num_nodes_hint))
+
+    collected_nodes = tf.concat(nodes_to_collect, axis=-1)
+    aggregated_nodes = self._aggregator_model(graph.replace(nodes=updated_nodes))
+    updated_nodes, next_state = self._node_model(aggregated_nodes, prev_state, **kwargs)
+    return graph.replace(nodes=updated_nodes), next_state
