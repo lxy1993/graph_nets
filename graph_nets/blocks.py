@@ -437,6 +437,27 @@ class EdgeBlock(_base.AbstractModule):
     with self._enter_variable_scope():
       self._edge_model = edge_model_fn()
 
+  def _collect_features(self):
+    edges_to_collect = []
+
+    if self._use_edges:
+      _validate_graph(graph, (EDGES,), "when use_edges == True")
+      edges_to_collect.append(graph.edges)
+
+    if self._use_receiver_nodes:
+      edges_to_collect.append(broadcast_receiver_nodes_to_edges(graph))
+
+    if self._use_sender_nodes:
+      edges_to_collect.append(broadcast_sender_nodes_to_edges(graph))
+
+    if self._use_globals:
+      num_edges_hint = _get_static_num_edges(graph)
+      edges_to_collect.append(
+          broadcast_globals_to_edges(graph, num_edges_hint=num_edges_hint))
+
+    collected_edges = tf.concat(edges_to_collect, axis=-1)
+    return collected_edges
+
   def _build(self, graph):
     """Connects the edge block.
 
@@ -458,25 +479,7 @@ class EdgeBlock(_base.AbstractModule):
     _validate_graph(
         graph, (SENDERS, RECEIVERS, N_EDGE), " when using an EdgeBlock")
 
-    edges_to_collect = []
-
-    if self._use_edges:
-      _validate_graph(graph, (EDGES,), "when use_edges == True")
-      edges_to_collect.append(graph.edges)
-
-    if self._use_receiver_nodes:
-      edges_to_collect.append(broadcast_receiver_nodes_to_edges(graph))
-
-    if self._use_sender_nodes:
-      edges_to_collect.append(broadcast_sender_nodes_to_edges(graph))
-
-    if self._use_globals:
-      num_edges_hint = _get_static_num_edges(graph)
-      edges_to_collect.append(
-          broadcast_globals_to_edges(graph, num_edges_hint=num_edges_hint))
-
-    collected_edges = tf.concat(edges_to_collect, axis=-1)
-    updated_edges = self._edge_model(collected_edges)
+    updated_edges = self._edge_model(self._collect_features())
     return graph.replace(edges=updated_edges)
 
 
@@ -557,19 +560,7 @@ class NodeBlock(_base.AbstractModule):
         self._sent_edges_aggregator = SentEdgesToNodesAggregator(
             sent_edges_reducer)
 
-  def _build(self, graph):
-    """Connects the node block.
-
-    Args:
-      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
-        features (if `use_received_edges` or `use_sent_edges` is `True`),
-        individual nodes features (if `use_nodes` is True) and per graph globals
-        (if `use_globals` is `True`) should be concatenable on the last axis.
-
-    Returns:
-      An output `graphs.GraphsTuple` with updated nodes.
-    """
-
+  def _collect_features(self):
     nodes_to_collect = []
 
     if self._use_received_edges:
@@ -591,7 +582,22 @@ class NodeBlock(_base.AbstractModule):
           broadcast_globals_to_nodes(graph, num_nodes_hint=num_nodes_hint))
 
     collected_nodes = tf.concat(nodes_to_collect, axis=-1)
-    updated_nodes = self._node_model(collected_nodes)
+    return collected_nodes
+
+  def _build(self, graph):
+    """Connects the node block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        features (if `use_received_edges` or `use_sent_edges` is `True`),
+        individual nodes features (if `use_nodes` is True) and per graph globals
+        (if `use_globals` is `True`) should be concatenable on the last axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated nodes.
+    """
+
+    updated_nodes = self._node_model(self.collect_features())
     return graph.replace(nodes=updated_nodes)
 
 
@@ -663,18 +669,7 @@ class GlobalBlock(_base.AbstractModule):
         self._nodes_aggregator = NodesToGlobalsAggregator(
             nodes_reducer)
 
-  def _build(self, graph):
-    """Connects the global block.
-
-    Args:
-      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
-        (if `use_edges` is `True`), individual nodes (if `use_nodes` is True)
-        and per graph globals (if `use_globals` is `True`) should be
-        concatenable on the last axis.
-
-    Returns:
-      An output `graphs.GraphsTuple` with updated globals.
-    """
+  def _collect_features(self):
     globals_to_collect = []
 
     if self._use_edges:
@@ -690,7 +685,21 @@ class GlobalBlock(_base.AbstractModule):
       globals_to_collect.append(graph.globals)
 
     collected_globals = tf.concat(globals_to_collect, axis=-1)
-    updated_globals = self._global_model(collected_globals)
+    return collected_globals
+
+  def _build(self, graph):
+    """Connects the global block.
+
+    Args:
+      graph: A `graphs.GraphsTuple` containing `Tensor`s, whose individual edges
+        (if `use_edges` is `True`), individual nodes (if `use_nodes` is True)
+        and per graph globals (if `use_globals` is `True`) should be
+        concatenable on the last axis.
+
+    Returns:
+      An output `graphs.GraphsTuple` with updated globals.
+    """
+    updated_globals = self._global_model(self._collect_features())
     return graph.replace(globals=updated_globals)
 
 
@@ -818,24 +827,7 @@ class RecurrentEdgeBlock(EdgeBlock):
     _validate_graph(
         graph, (SENDERS, RECEIVERS, N_EDGE), " when using an RecurrentEdgeBlock")
 
-    edges_to_collect = []
-
-    if self._use_edges:
-      _validate_graph(graph, (EDGES,), "when use_edges == True")
-      edges_to_collect.append(graph.edges)
-
-    if self._use_receiver_nodes:
-      edges_to_collect.append(broadcast_receiver_nodes_to_edges(graph))
-
-    if self._use_sender_nodes:
-      edges_to_collect.append(broadcast_sender_nodes_to_edges(graph))
-
-    if self._use_globals:
-      num_edges_hint = _get_static_num_edges(graph)
-      edges_to_collect.append(
-          broadcast_globals_to_edges(graph, num_edges_hint=num_edges_hint))
-
-    collected_edges = tf.concat(edges_to_collect, axis=-1)
+    collected_edges = self._collect_features()
     updated_edges, next_state = self._edge_model(collected_edges, prev_state, **kwargs)
     return graph.replace(edges=updated_edges), next_state
 
@@ -939,28 +931,8 @@ class RecurrentNodeBlock(NodeBlock):
       An output `graphs.GraphsTuple` with updated nodes.
     """
 
-    nodes_to_collect = []
-
-    if self._use_received_edges:
-      nodes_to_collect.append(self._received_edges_aggregator(graph))
-
-    if self._use_sent_edges:
-      nodes_to_collect.append(self._sent_edges_aggregator(graph))
-
-    if self._use_nodes:
-      _validate_graph(graph, (NODES,), "when use_nodes == True")
-      nodes_to_collect.append(graph.nodes)
-
-    if self._use_globals:
-      # The hint will be an integer if the graph has node features and the total
-      # number of nodes is known at tensorflow graph definition time, or None
-      # otherwise.
-      num_nodes_hint = _get_static_num_nodes(graph)
-      nodes_to_collect.append(
-          broadcast_globals_to_nodes(graph, num_nodes_hint=num_nodes_hint))
-
-    collected_nodes = tf.concat(nodes_to_collect, axis=-1)
-    aggregated_nodes = self._aggregator_model(graph.replace(nodes=updated_nodes))
+    collected_nodes = self._collect_features()
+    aggregated_nodes = self._aggregator_model(graph.replace(nodes=collected_nodes))
     updated_nodes, next_state = self._node_model(aggregated_nodes, prev_state, **kwargs)
     return graph.replace(nodes=updated_nodes), next_state
 
@@ -1046,21 +1018,7 @@ class RecurrentGlobalBlock(GlobalBlock):
     Returns:
       An output `graphs.GraphsTuple` with updated globals.
     """
-    globals_to_collect = []
-
-    if self._use_edges:
-      _validate_graph(graph, (EDGES,), "when use_edges == True")
-      globals_to_collect.append(self._edges_aggregator(graph))
-
-    if self._use_nodes:
-      _validate_graph(graph, (NODES,), "when use_nodes == True")
-      globals_to_collect.append(self._nodes_aggregator(graph))
-
-    if self._use_globals:
-      _validate_graph(graph, (GLOBALS,), "when use_globals == True")
-      globals_to_collect.append(graph.globals)
-
-    collected_globals = tf.concat(globals_to_collect, axis=-1)
+    collected_globals = self._collect_features()
     updated_globals, next_state = self._global_model(collected_globals, prev_state, **kwargs)
     return graph.replace(globals=updated_globals), next_state
 
