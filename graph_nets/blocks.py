@@ -437,7 +437,7 @@ class EdgeBlock(_base.AbstractModule):
     with self._enter_variable_scope():
       self._edge_model = edge_model_fn()
 
-  def _collect_features(self):
+  def _collect_features(self, graph):
     edges_to_collect = []
 
     if self._use_edges:
@@ -480,7 +480,7 @@ class EdgeBlock(_base.AbstractModule):
     _validate_graph(
         graph, (SENDERS, RECEIVERS, N_EDGE), " when using an EdgeBlock")
 
-    collected_edges = self._collect_features()
+    collected_edges = self._collect_features(graph)
     updated_edges = self._edge_model(collected_edges, **kwargs)
     return graph.replace(edges=updated_edges)
 
@@ -562,7 +562,7 @@ class NodeBlock(_base.AbstractModule):
         self._sent_edges_aggregator = SentEdgesToNodesAggregator(
             sent_edges_reducer)
 
-  def _collect_features(self):
+  def _collect_features(self, graph):
     nodes_to_collect = []
 
     if self._use_received_edges:
@@ -600,7 +600,7 @@ class NodeBlock(_base.AbstractModule):
       An output `graphs.GraphsTuple` with updated nodes.
     """
 
-    collected_nodes = self.collect_features()
+    collected_nodes = self._collect_features(graph)
     updated_nodes = self._node_model(collected_nodes, **kwargs)
     return graph.replace(nodes=updated_nodes)
 
@@ -673,7 +673,7 @@ class GlobalBlock(_base.AbstractModule):
         self._nodes_aggregator = NodesToGlobalsAggregator(
             nodes_reducer)
 
-  def _collect_features(self):
+  def _collect_features(self, graph):
     globals_to_collect = []
 
     if self._use_edges:
@@ -704,7 +704,7 @@ class GlobalBlock(_base.AbstractModule):
     Returns:
       An output `graphs.GraphsTuple` with updated globals.
     """
-    collected_globals = self._collect_features()
+    collected_globals = self._collect_features(graph)
     updated_globals = self._global_model(collected_globals, **kwargs)
     return graph.replace(globals=updated_globals)
 
@@ -833,7 +833,7 @@ class RecurrentEdgeBlock(EdgeBlock):
     _validate_graph(
         graph, (SENDERS, RECEIVERS, N_EDGE), " when using an RecurrentEdgeBlock")
 
-    collected_edges = self._collect_features()
+    collected_edges = self._collect_features(graph)
     updated_edges, next_state = self._edge_model(collected_edges, prev_state, **kwargs)
     return graph.replace(edges=updated_edges), next_state
 
@@ -853,7 +853,7 @@ class RecurrentNodeBlock(NodeBlock):
                use_sent_edges=False,
                use_nodes=True,
                use_globals=True,
-               aggregator_model_fn=NodesAggregator,
+               aggregator_model_fn=NeighborhoodAggregator,
                neighborhood_reducer=tf.math.unsorted_segment_sum,
                received_edges_reducer=tf.math.unsorted_segment_sum,
                sent_edges_reducer=tf.math.unsorted_segment_sum,
@@ -937,7 +937,7 @@ class RecurrentNodeBlock(NodeBlock):
       An output `graphs.GraphsTuple` with updated nodes.
     """
 
-    collected_nodes = self._collect_features()
+    collected_nodes = self._collect_features(graph)
     aggregated_nodes = self._aggregator_model(graph.replace(nodes=collected_nodes))
     updated_nodes, next_state = self._node_model(aggregated_nodes, prev_state, **kwargs)
     return graph.replace(nodes=updated_nodes), next_state
@@ -997,7 +997,7 @@ class RecurrentGlobalBlock(GlobalBlock):
                                       use_globals=use_globals,
                                       nodes_reducer=nodes_reducer,
                                       edges_reducer=edges_reducer,
-                                      name="recurrent_global_block"):
+                                      name="recurrent_global_block")
 
   def initial_state(self, batch_size, **kwargs):
     """Constructs an initial state for the recurrent model.
@@ -1024,7 +1024,7 @@ class RecurrentGlobalBlock(GlobalBlock):
     Returns:
       An output `graphs.GraphsTuple` with updated globals.
     """
-    collected_globals = self._collect_features()
+    collected_globals = self._collect_features(graph)
     updated_globals, next_state = self._global_model(collected_globals, prev_state, **kwargs)
     return graph.replace(globals=updated_globals), next_state
 
