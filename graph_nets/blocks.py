@@ -804,7 +804,7 @@ class RecurrentEdgeBlock(EdgeBlock):
     Returns:
       Arbitrarily nested initial state for the recurrent model.
     """
-    self._edge_model.initial_state(batch_size, **kwargs)
+    return self._edge_model.initial_state(batch_size, **kwargs)
 
   def _build(self, graph, prev_state, **kwargs):
     """Connects the recurrent edge block.
@@ -916,7 +916,7 @@ class RecurrentNodeBlock(NodeBlock):
     Returns:
       Arbitrarily nested initial state for the recurrent model.
     """
-    self._node_model.initial_state(batch_size, **kwargs)
+    return self._node_model.initial_state(batch_size, **kwargs)
 
 
   def _build(self, graph, prev_state, **kwargs):
@@ -1005,7 +1005,7 @@ class RecurrentGlobalBlock(GlobalBlock):
     Returns:
       Arbitrarily nested initial state for the recurrent model.
     """
-    self._node_model.initial_state(batch_size, **kwargs)
+    return self._node_model.initial_state(batch_size, **kwargs)
 
   def _build(self, graph, prev_state, **kwargs):
     """Connects the recurrent global block.
